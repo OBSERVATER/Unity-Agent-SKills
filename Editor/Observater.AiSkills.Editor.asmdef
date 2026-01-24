@@ -1,0 +1,19 @@
+{
+    "name": "Observater.AiSkills.Editor",
+    "rootNamespace": "",
+    "references": [
+        "Observater.AiSkills",
+        "Unity.Scripting.Python.Editor"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

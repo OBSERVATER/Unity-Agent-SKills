@@ -1,0 +1,11 @@
+{
+    "name": "Observater.AiSkills.Tests",
+    "references": [
+        "Observater.AiSkills"
+    ],
+    "optionalUnityReferences": [
+        "TestAssemblies"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": []
+}
