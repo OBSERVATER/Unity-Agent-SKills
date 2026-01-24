@@ -1,9 +1,13 @@
 {
-	"name": "com.observater.aiskills",
-	"displayName":"AI Skills",
-	"version": "0.1.0",
-	"unity": "6000.0",
-	"description": "Replace this string with your own description of the package. This description appears in the Package Manager window when the user selects this package from the list. \n\nFor best results, use this text to summarize: \n\u25AA What the package does \n\u25AA How it can benefit the user \n\nNote: Special formatting characters are supported, including line breaks ('\\n') and bullets ('\\u25AA').",
-	"dependencies": {
-	}
+  "name": "com.observater.aiskills",
+  "displayName": "AI Skills",
+  "version": "0.1.0",
+  "unity": "2021.3",
+  "description": "AI Skills is an editor automation tool that bridges Large Language Models (LLM) with Unity's Python execution environment. It allows developers to control the Unity Editor using natural language commands.\n\nKey Features:\n\u25AA GameObject Management: Create, find, and manipulate scene objects.\n\u25AA Component Control: Automatically add and configure components like Rigidbodies and Colliders.\n\u25AA Asset Pipeline: Find, move, and manage project assets via Python scripts.\n\u25AA UI Generation: Instantly create functional UI hierarchies (Canvas, Text, Buttons).\n\u25AA Prefab Workflow: Instantiate and save prefabs programmatically.",
+  "dependencies": {
+    "com.unity.scripting.python": "7.0.2",
+    "com.unity.nuget.newtonsoft-json": "3.2.1",
+    "com.unity.ugui": "2.0.0",
+    "com.unity.ui": "1.0.0"
+  }
 }
