@@ -12,6 +12,7 @@ description: Unity 核心环境与全局定义
     * `import UnityEngine` -> 使用 `UnityEngine.GameObject`
     * `import UnityEditor` -> 使用 `UnityEditor.AssetDatabase`
     * `import UnityEditor.SceneManagement` -> 场景相关
+    * 若要在Python中使用StringBuilder，使用``from System.Text import StringBuilder`
     * 禁止使用 `from UnityEngine import *`
 3.  **代码结构**: 只能输出**一个** `python` 代码块。脚本末尾必须**直接调用**入口函数。
 4.  **禁止事项**:

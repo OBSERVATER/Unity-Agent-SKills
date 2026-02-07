@@ -3,6 +3,7 @@ import glob
 import json
 import re
 import yaml
+from config import SHOW_RAW_RESPONSE
 
 class SkillManager:
     def __init__(self, skills_dir): 
@@ -80,6 +81,8 @@ class SkillManager:
             )
             content = res.choices[0].message.content.replace("```json","").replace("```","").strip()
             selected_names = json.loads(content)
+            if SHOW_RAW_RESPONSE:
+                print(f"\n[Debug] Raw Skill Selection Response:\n{res}\n")
             
             # 3. 过滤有效技能
             return [n for n in selected_names if n in self.index]

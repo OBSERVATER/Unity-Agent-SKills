@@ -18,3 +18,5 @@ CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 # 技能文件夹路径 -> .../Runtime/Python/Skills
 # 解析：从 Scripts 目录往上退一级，进入 Skills 目录
 SKILLS_DIR = os.path.abspath(os.path.join(CURRENT_DIR, "..", "Skills"))
+
+SHOW_RAW_RESPONSE = True

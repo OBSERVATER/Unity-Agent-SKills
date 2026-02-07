@@ -8,6 +8,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Threading.Tasks;
 using System.Text.RegularExpressions;
+using System.Linq;
 using Newtonsoft.Json.Linq;
 using Observater.AiSkills.Runtime.Core;
 
@@ -15,7 +16,7 @@ namespace Observater.AiSkills.Editor
 {
     /// <summary>
     /// AI Copilot 编辑器窗口。
-    /// <para>提供聊天界面、设置面板、日志显示以及与 Python 后端通信的核心 UI 逻辑。</para>
+    /// <para>负责 UI 交互，收集用户输入与附件路径，并发送给 Python 后端。</para>
     /// </summary>
     public class CopilotWindow : EditorWindow
     {
@@ -27,26 +28,28 @@ namespace Observater.AiSkills.Editor
         private static readonly Color StatusBubbleColor = new Color(0.15f, 0.15f, 0.15f);
         private static readonly Color TextColor = new Color(0.8f, 0.8f, 0.8f);
         private static readonly Color StatusTextColor = new Color(0.6f, 0.6f, 0.6f);
-        private static readonly Color AttachmentBgColor = new Color(0.18f, 0.18f, 0.18f);
+        private static readonly Color AttachmentChipColor = new Color(0.24f, 0.31f, 0.39f);
         private static readonly Color LogBgColor = new Color(0.08f, 0.08f, 0.08f);
         private static readonly Color LogTextColor = new Color(0.6f, 0.6f, 0.6f);
         private static readonly Color CodeBlockBgColor = new Color(0.1f, 0.1f, 0.1f);
         private static readonly Color StopBtnColor = new Color(0.8f, 0.2f, 0.2f);
-        // [新增] 技能标签颜色
         private static readonly Color SkillTagColor = new Color(0.6f, 0.4f, 0.8f);
 
         private const string PREF_SHOW_DEBUG = "AiSkills_ShowDebug";
 
+        // UI 元素
         private ScrollView _chatView;
         private TextField _inputField;
         private Button _sendBtn;
+
+        // 附件相关
         private List<string> _attachments = new List<string>();
         private VisualElement _attachmentContainer;
 
+        // 日志与设置
         private VisualElement _logContainer;
         private ScrollView _statusLogView;
         private Foldout _logFoldout;
-
         private Foldout _settingsFoldout;
         private Toggle _debugToggle;
 
@@ -57,6 +60,9 @@ namespace Observater.AiSkills.Editor
         private bool _showDebugLog = true;
 
         private UnityWebRequest _currentRequest;
+
+        // 不支持的文件后缀（Unity端简单过滤，Python端会有更严格的检查）
+        private readonly string[] _binaryExtensions = { ".dll", ".exe", ".so", ".png", ".jpg", ".mat", ".prefab", ".meta" };
 
         [MenuItem("Tools/AI Copilot")]
         public static void ShowWindow()
@@ -98,9 +104,6 @@ namespace Observater.AiSkills.Editor
             UpdateLogAreaVisibility();
         }
 
-        // ... (CreateSettingsArea, CreateLogArea, CreateToolbar, CreateInputArea, OnActionClicked, UpdateUIState, CancelRequest, OnSendClicked 保持不变) ...
-        // 请保留这部分原有的代码
-        
         private void CreateSettingsArea(VisualElement root)
         {
             var container = new VisualElement
@@ -127,10 +130,10 @@ namespace Observater.AiSkills.Editor
             StyleToggleLabel(_debugToggle);
             _settingsFoldout.Add(_debugToggle);
 
-            var consoleToggle = new Toggle("Show Python Console (Restart Req.)") 
-            { 
+            var consoleToggle = new Toggle("Show Python Console (Restart Req.)")
+            {
                 value = config.ShowConsole,
-                tooltip = "Toggle to show external Python command window. Requires 'Restart Service' to take effect."
+                tooltip = "Toggle to show external Python command window."
             };
             consoleToggle.RegisterValueChangedCallback(evt =>
             {
@@ -142,13 +145,13 @@ namespace Observater.AiSkills.Editor
 
             var apiKeyField = new TextField("API Key") { value = config.ApiKey, isPasswordField = true };
             apiKeyField.RegisterValueChangedCallback(e => { config.ApiKey = e.newValue; AiSkillsBridge.SaveConfig(); });
-            
+
             var baseUrlField = new TextField("Base URL") { value = config.BaseUrl };
             baseUrlField.RegisterValueChangedCallback(e => { config.BaseUrl = e.newValue; AiSkillsBridge.SaveConfig(); });
-            
+
             var modelField = new TextField("Model") { value = config.Model };
             modelField.RegisterValueChangedCallback(e => { config.Model = e.newValue; AiSkillsBridge.SaveConfig(); });
-            
+
             var portField = new IntegerField("Python Port") { value = config.Port };
             portField.RegisterValueChangedCallback(e => { config.Port = e.newValue; AiSkillsBridge.SaveConfig(); });
 
@@ -184,7 +187,8 @@ namespace Observater.AiSkills.Editor
             };
             _logFoldout = new Foldout
             {
-                text = "Process Log (Debug)", value = true,
+                text = "Process Log (Debug)",
+                value = true,
                 style = { fontSize = 11, color = LogTextColor, paddingLeft = 5 }
             };
             _statusLogView = new ScrollView { style = { height = 120 } };
@@ -198,14 +202,15 @@ namespace Observater.AiSkills.Editor
             var toolbar = new Toolbar();
             toolbar.style.backgroundColor = new Color(0.16f, 0.16f, 0.16f);
             toolbar.style.flexShrink = 0;
-            
+
             toolbar.Add(new ToolbarButton(() =>
             {
                 AiSkillsBridge.RestartPython();
                 _statusLogView?.Clear();
                 AddMessage("System", "Service Restarted.", false);
-            }) { text = "Restart Service", style = { unityFontStyleAndWeight = FontStyle.Bold } });
-            
+            })
+            { text = "Restart Service", style = { unityFontStyleAndWeight = FontStyle.Bold } });
+
             toolbar.Add(new ToolbarButton(() => { _chatView.Clear(); }) { text = "Clear Chat" });
             toolbar.Add(new ToolbarButton(() => { _statusLogView?.Clear(); }) { text = "Clear Log" });
             root.Add(toolbar);
@@ -222,14 +227,24 @@ namespace Observater.AiSkills.Editor
                 }
             };
             SetPadding(container.style, 10);
-            CreateAttachmentUI(container);
 
+            // 附件操作栏
+            CreateAttachmentTools(container);
+
+            // 附件显示区
+            _attachmentContainer = new VisualElement
+            {
+                style = { flexDirection = FlexDirection.Row, flexWrap = Wrap.Wrap, marginBottom = 5, minHeight = 0 }
+            };
+            container.Add(_attachmentContainer);
+
+            // 输入框区域
             var row = new VisualElement
             {
                 style =
                 {
                     flexDirection = FlexDirection.Row, backgroundColor = InputBgColor,
-                    minHeight = 30, alignItems = Align.Center, flexWrap = Wrap.NoWrap
+                    minHeight = 30, alignItems = Align.FlexEnd, flexWrap = Wrap.NoWrap
                 }
             };
             row.style.borderTopLeftRadius = 4;
@@ -239,6 +254,7 @@ namespace Observater.AiSkills.Editor
 
             _inputField = new TextField
             {
+                multiline = true,
                 style =
                 {
                     flexGrow = 1, flexShrink = 1,
@@ -247,11 +263,13 @@ namespace Observater.AiSkills.Editor
                 }
             };
 
+            // Shift+Enter 发送，Enter 换行
             _inputField.RegisterCallback<KeyDownEvent>(evt =>
             {
-                if (evt.keyCode == KeyCode.Return && !evt.shiftKey)
+                if (evt.keyCode == KeyCode.Return && evt.shiftKey)
                 {
                     evt.StopPropagation();
+                    evt.PreventDefault();
                     OnActionClicked();
                 }
             });
@@ -285,7 +303,114 @@ namespace Observater.AiSkills.Editor
             row.Add(_inputField);
             row.Add(_sendBtn);
             container.Add(row);
+
+            // 提示信息
+            container.Add(new Label("Shift+Enter to Send")
+            {
+                style = { fontSize = 9, color = Color.gray, alignSelf = Align.FlexEnd, marginRight = 5 }
+            });
+
             root.Add(container);
+        }
+
+        private void CreateAttachmentTools(VisualElement parent)
+        {
+            var row = new VisualElement { style = { flexDirection = FlexDirection.Row, marginBottom = 5 } };
+
+            // 1. 添加单个文件
+            row.Add(new Button(AddFile)
+            {
+                text = "+ Add File",
+                style = { fontSize = 10, backgroundColor = AttachmentChipColor, color = Color.white }
+            });
+
+            // 2. 添加选中的文件 (支持多选)
+            row.Add(new Button(AddSelectedAssets)
+            {
+                text = "+ Add Selected",
+                tooltip = "Add currently selected assets from Project window",
+                style = { fontSize = 10, backgroundColor = AttachmentChipColor, color = Color.white }
+            });
+
+            // 3. 清空列表
+            row.Add(new Button(() => { _attachments.Clear(); RefreshAttachmentList(); })
+            {
+                text = "Clear Files",
+                style = { fontSize = 10, backgroundColor = new Color(0.3f, 0.3f, 0.3f), color = Color.white }
+            });
+
+            parent.Add(row);
+        }
+
+        private void AddFile()
+        {
+            string path = EditorUtility.OpenFilePanel("Select File", "Assets", "");
+            if (string.IsNullOrEmpty(path)) return;
+
+            // 转换为相对路径
+            if (path.StartsWith(Application.dataPath))
+                path = "Assets" + path.Substring(Application.dataPath.Length);
+
+            if (!_attachments.Contains(path))
+            {
+                _attachments.Add(path);
+                RefreshAttachmentList();
+            }
+        }
+
+        private void AddSelectedAssets()
+        {
+            var selectedObjects = Selection.GetFiltered<UnityEngine.Object>(SelectionMode.Assets);
+            int count = 0;
+            foreach (var obj in selectedObjects)
+            {
+                string path = AssetDatabase.GetAssetPath(obj);
+                if (string.IsNullOrEmpty(path)) continue;
+
+                // 简单的文件夹处理：如果是文件夹，可能暂不递归添加，避免误操作
+                if (Directory.Exists(path))
+                {
+                    // 可选：如果希望支持文件夹，可以在这里做 GetFiles
+                    // 目前仅添加选中的具体文件
+                    continue;
+                }
+
+                if (!_attachments.Contains(path))
+                {
+                    // 简单过滤
+                    string ext = Path.GetExtension(path).ToLower();
+                    if (_binaryExtensions.Contains(ext)) continue;
+
+                    _attachments.Add(path);
+                    count++;
+                }
+            }
+            if (count > 0) RefreshAttachmentList();
+            else HandleStatusLog("[Info] No valid text assets selected.");
+        }
+
+        private void RefreshAttachmentList()
+        {
+            _attachmentContainer.Clear();
+            if (_attachments.Count == 0) return;
+
+            foreach (var p in _attachments)
+            {
+                var label = new Label(Path.GetFileName(p))
+                {
+                    style =
+                    {
+                        backgroundColor = AttachmentChipColor,
+                        color = Color.white,
+                        paddingLeft = 6, paddingRight = 6, paddingTop = 2, paddingBottom = 2,
+                        marginRight = 4, marginBottom = 4,
+                        fontSize = 10,
+                        borderTopLeftRadius = 4, borderTopRightRadius = 4,
+                        borderBottomLeftRadius = 4, borderBottomRightRadius = 4
+                    }
+                };
+                _attachmentContainer.Add(label);
+            }
         }
 
         private void OnActionClicked()
@@ -332,13 +457,26 @@ namespace Observater.AiSkills.Editor
                 string p = _inputField.value.Trim();
                 if (string.IsNullOrEmpty(p) && _attachments.Count == 0) return;
 
-                AddMessage("User", p, true);
+                // 构建用户显示的 Prompt (包含附件提示)
+                string displayMsg = p;
+                if (_attachments.Count > 0)
+                {
+                    displayMsg += $"\n\n[Attached {_attachments.Count} files]";
+                }
+
+                AddMessage("User", displayMsg, true);
                 UpdateUIState(true);
                 _inputField.value = "";
-                CreateStatusBubble("Thinking...");
-                HandleStatusLog($"[Req] Sending request...");
 
-                await SendToPythonAndProcess(p);
+                // 清空附件列表（可选：发送后是否清空？通常习惯清空以防下一次误发）
+                var sentAttachments = new List<string>(_attachments);
+                _attachments.Clear();
+                RefreshAttachmentList();
+
+                CreateStatusBubble("Thinking...");
+                HandleStatusLog($"[Req] Sending request ({sentAttachments.Count} files)...");
+
+                await SendToPythonAndProcess(p, sentAttachments);
 
                 RemoveStatusBubble();
             }
@@ -354,65 +492,80 @@ namespace Observater.AiSkills.Editor
             }
         }
 
-        // ================= [核心修改] 解析 Skills 并显示 =================
-        private async Task SendToPythonAndProcess(string prompt)
+        private async Task SendToPythonAndProcess(string prompt, List<string> attachments)
         {
             var config = AiSkillsBridge.Config;
+
+            // [关键修改] 发送路径列表 + 项目根目录
+            // Path.GetDirectoryName(Application.dataPath) 通常指向 Unity 项目根文件夹 (包含 Assets, Packages 等)
+            string projectRoot = Path.GetDirectoryName(Application.dataPath);
+
             var json = new JObject
             {
-                ["prompt"] = prompt, ["api_key"] = config.ApiKey, ["base_url"] = config.BaseUrl,
-                ["model"] = config.Model, ["attachments"] = JArray.FromObject(_attachments)
+                ["prompt"] = prompt,
+                ["api_key"] = config.ApiKey,
+                ["base_url"] = config.BaseUrl,
+                ["model"] = config.Model,
+
+                // 发送给 Python 的数据
+                ["attachments"] = JArray.FromObject(attachments),
+                ["project_root"] = projectRoot
             };
 
             _currentRequest = UnityWebRequest.Post($"http://127.0.0.1:{config.Port}/chat",
                 json.ToString(), "application/json");
 
             _currentRequest.downloadHandler = new DownloadHandlerBuffer();
-            _currentRequest.timeout = 300;
+            _currentRequest.timeout = 300; // 5分钟超时，大文件读取可能耗时
             _currentRequest.disposeUploadHandlerOnDispose = true;
             _currentRequest.disposeDownloadHandlerOnDispose = true;
 
             var op = _currentRequest.SendWebRequest();
             while (!op.isDone) await Task.Yield();
 
-            if (_currentRequest.result == UnityWebRequest.Result.ConnectionError &&
-                _currentRequest.error == "Request aborted") return;
+            if (_currentRequest.result == UnityWebRequest.Result.ConnectionError ||
+                _currentRequest.result == UnityWebRequest.Result.ProtocolError)
+            {
+                if (_currentRequest.error != "Request aborted")
+                {
+                    HandleStatusLog($"[Error] Net Fail: {_currentRequest.error}");
+                    AddMessage("System", $"Connection Error: {_currentRequest.error}", false);
+                }
+                return;
+            }
 
             if (_currentRequest.result == UnityWebRequest.Result.Success)
             {
                 HandleStatusLog("[Net] Response Received");
-
                 try
                 {
                     var root = JObject.Parse(_currentRequest.downloadHandler.text);
                     string aiReply = root["reply"]?.ToString() ?? "No reply";
 
-                    // --- [新增] 解析并显示选用的 Skills ---
+                    // 处理技能显示
                     var skillsToken = root["selected_skills"];
                     string skillHeader = "";
                     if (skillsToken != null && skillsToken.HasValues)
                     {
                         var skills = skillsToken.ToObject<List<string>>();
                         string skillsStr = string.Join(", ", skills);
-                        
-                        // 1. 在 Debug Log 中显示
                         HandleStatusLog($"[Skill] Selected: {skillsStr}");
-                        
-                        // 2. 准备显示在气泡中的文本
                         if (skills.Count > 0)
-                        {
                             skillHeader = $"[🛠 Used Skills: {skillsStr}]\n\n";
-                        }
                     }
-                    else
-                    {
-                        HandleStatusLog($"[Skill] None selected.");
-                    }
-                    // ------------------------------------
 
-                    // 将技能信息拼接到回复前面，AddMessage 会自动处理
+                    // [新增] 处理 Token 用量显示 (可选)
+                    if (root["usage"] != null)
+                    {
+                        var usage = root["usage"];
+                        string total = usage["total_tokens"]?.ToString();
+                        if (!string.IsNullOrEmpty(total))
+                            HandleStatusLog($"[Info] Tokens: {total}");
+                    }
+
                     AddMessage("AI", skillHeader + aiReply, false);
 
+                    // 处理执行结果
                     if (root["execution"] != null)
                     {
                         var exec = root["execution"];
@@ -427,51 +580,34 @@ namespace Observater.AiSkills.Editor
                     AddMessage("System", $"Parse Error: {e.Message}", false);
                 }
             }
-            else
-            {
-                HandleStatusLog($"[Error] Net Fail: {_currentRequest.error}");
-                AddMessage("System", $"Connection Error: {_currentRequest.error}", false);
-            }
 
             _currentRequest.Dispose();
             _currentRequest = null;
         }
 
-        // ... (CreateAttachmentUI, PickAttachment, RefreshAttachmentList, SetPadding, HandleStatusLog, CreateStatusBubble, RemoveStatusBubble 保持不变) ...
-
-        private void CreateAttachmentUI(VisualElement parent) {
-            var row = new VisualElement { style = { flexDirection = FlexDirection.Row, marginBottom = 5 } };
-            row.Add(new Button(() => PickAttachment(false)) { text = "+ File", style = { fontSize = 10, backgroundColor = AttachmentBgColor, color = TextColor } });
-            row.Add(new Button(() => PickAttachment(true)) { text = "+ Folder", style = { fontSize = 10, backgroundColor = AttachmentBgColor, color = TextColor } });
-            row.Add(new Button(() => { _attachments.Clear(); RefreshAttachmentList(); }) { text = "Clear", style = { fontSize = 10, backgroundColor = AttachmentBgColor, color = TextColor } });
-            parent.Add(row);
-            _attachmentContainer = new VisualElement { style = { flexDirection = FlexDirection.Row, flexWrap = Wrap.Wrap, marginBottom = 5 } };
-            parent.Add(_attachmentContainer);
-        }
-        private void PickAttachment(bool isFolder) {
-            string path = isFolder ? EditorUtility.OpenFolderPanel("Select", "Assets", "") : EditorUtility.OpenFilePanel("Select", "Assets", "");
-            if (!string.IsNullOrEmpty(path)) { if (path.StartsWith(Application.dataPath)) path = "Assets" + path.Substring(Application.dataPath.Length); if (!_attachments.Contains(path)) { _attachments.Add(path); RefreshAttachmentList(); } }
-        }
-        private void RefreshAttachmentList() {
-            _attachmentContainer.Clear();
-            foreach (var p in _attachments) _attachmentContainer.Add(new Label(Path.GetFileName(p)) { style = { backgroundColor = new Color(0.24f, 0.31f, 0.39f), color = Color.white, paddingLeft = 6, paddingRight = 6, marginRight = 4, marginBottom = 4, fontSize = 10, borderTopLeftRadius = 4, borderTopRightRadius = 4, borderBottomLeftRadius = 4, borderBottomRightRadius = 4 } });
-        }
+        // 辅助方法保持不变
         private void SetPadding(IStyle s, float v) { s.paddingTop = v; s.paddingBottom = v; s.paddingLeft = v; s.paddingRight = v; }
-        private void HandleStatusLog(string msg) {
-            rootVisualElement.schedule.Execute(() => {
-                if (_showDebugLog && _statusLogView != null) {
+
+        private void HandleStatusLog(string msg)
+        {
+            rootVisualElement.schedule.Execute(() =>
+            {
+                if (_showDebugLog && _statusLogView != null)
+                {
                     var label = new Label($"[{DateTime.Now:HH:mm:ss}] {msg}") { style = { fontSize = 10, color = LogTextColor, whiteSpace = WhiteSpace.Normal, marginBottom = 2 } };
                     if (msg.Contains("[Error]") || msg.Contains("Fail")) label.style.color = new Color(1f, 0.4f, 0.4f);
                     else if (msg.Contains("[OK]") || msg.Contains("[Done]")) label.style.color = new Color(0.4f, 1f, 0.4f);
                     else if (msg.Contains("[In]") || msg.Contains("[Out]")) label.style.color = new Color(0.4f, 0.8f, 1f);
-                    else if (msg.Contains("[Skill]")) label.style.color = SkillTagColor; // 技能日志使用紫色
+                    else if (msg.Contains("[Skill]")) label.style.color = SkillTagColor;
                     _statusLogView.Add(label);
                     _statusLogView.schedule.Execute(() => _statusLogView.scrollOffset = new Vector2(0, _statusLogView.contentContainer.layout.height));
                 }
                 if (_isProcessing && _currentStatusLabel != null) { _currentStatusLabel.text = msg; if (msg.Contains("[Error]")) _currentStatusLabel.style.color = new Color(1f, 0.4f, 0.4f); }
             });
         }
-        private void CreateStatusBubble(string t) {
+
+        private void CreateStatusBubble(string t)
+        {
             _currentStatusContainer = new VisualElement { style = { flexDirection = FlexDirection.Row, marginBottom = 10, justifyContent = Justify.FlexStart } };
             var bubble = new VisualElement { style = { backgroundColor = StatusBubbleColor, color = StatusTextColor, maxWidth = Length.Percent(85), borderTopLeftRadius = 8, borderTopRightRadius = 8, borderBottomLeftRadius = 8, borderBottomRightRadius = 8, borderLeftWidth = 2, borderLeftColor = new Color(0.4f, 0.4f, 0.4f) } };
             SetPadding(bubble.style, 8);
@@ -481,6 +617,7 @@ namespace Observater.AiSkills.Editor
             _chatView.Add(_currentStatusContainer);
             _chatView.schedule.Execute(() => _chatView.scrollOffset = new Vector2(0, _chatView.contentContainer.layout.height));
         }
+
         private void RemoveStatusBubble() { if (_currentStatusContainer != null && _chatView.Contains(_currentStatusContainer)) { _chatView.Remove(_currentStatusContainer); } _currentStatusContainer = null; _currentStatusLabel = null; }
 
         private void AddMessage(string sender, string t, bool u)
@@ -514,23 +651,18 @@ namespace Observater.AiSkills.Editor
 
             SetPadding(bubble.style, 8);
 
-            // [新增] 对技能头进行简单的高亮着色支持 (如果文本以 [🛠 Used Skills: 开头)
+            // 处理 Skill Tag 高亮
             if (t.StartsWith("[🛠 Used Skills:"))
             {
                 int endIdx = t.IndexOf("]\n\n");
                 if (endIdx > 0)
                 {
                     string skillPart = t.Substring(0, endIdx + 1);
-                    t = t.Substring(endIdx + 3); // 移除头和换行
-                    
+                    t = t.Substring(endIdx + 3);
+
                     var skillLabel = new Label(skillPart)
                     {
-                        style = { 
-                            color = SkillTagColor, 
-                            fontSize = 10, 
-                            unityFontStyleAndWeight = FontStyle.Bold,
-                            marginBottom = 4
-                        }
+                        style = { color = SkillTagColor, fontSize = 10, unityFontStyleAndWeight = FontStyle.Bold, marginBottom = 4 }
                     };
                     bubble.Add(skillLabel);
                 }
@@ -545,13 +677,7 @@ namespace Observater.AiSkills.Editor
                 if (part.StartsWith("```python"))
                 {
                     string codeContent = part.Replace("```python", "").Replace("```", "").Trim();
-
-                    var foldout = new Foldout
-                    {
-                        text = "Python Code", value = false,
-                        style = { marginTop = 5, marginBottom = 5 }
-                    };
-
+                    var foldout = new Foldout { text = "Python Code", value = false, style = { marginTop = 5, marginBottom = 5 } };
                     var toggle = foldout.Q<Toggle>();
                     var label = toggle?.Q<Label>();
                     if (label != null) label.style.color = new Color(0.6f, 0.8f, 1f);
@@ -560,34 +686,25 @@ namespace Observater.AiSkills.Editor
                     {
                         style =
                         {
-                            backgroundColor = CodeBlockBgColor,
-                            color = new Color(0.8f, 0.9f, 0.8f),
-                            fontSize = 11,
-                            whiteSpace = WhiteSpace.Normal,
+                            backgroundColor = CodeBlockBgColor, color = new Color(0.8f, 0.9f, 0.8f),
+                            fontSize = 11, whiteSpace = WhiteSpace.Normal,
                             paddingTop = 5, paddingBottom = 5, paddingLeft = 5, paddingRight = 5,
-                            borderTopLeftRadius = 4, borderTopRightRadius = 4, borderBottomLeftRadius = 4,
-                            borderBottomRightRadius = 4
+                            borderTopLeftRadius = 4, borderTopRightRadius = 4, borderBottomLeftRadius = 4, borderBottomRightRadius = 4
                         },
                         selection = { isSelectable = true }
                     };
-
                     foldout.Add(codeLabel);
                     bubble.Add(foldout);
                 }
                 else
                 {
-                    var label = new Label(part.Trim())
-                    {
-                        style = { whiteSpace = WhiteSpace.Normal, fontSize = 13 }, selection = { isSelectable = true }
-                    };
-                    bubble.Add(label);
+                    bubble.Add(new Label(part.Trim()) { style = { whiteSpace = WhiteSpace.Normal, fontSize = 13 }, selection = { isSelectable = true } });
                 }
             }
 
             row.Add(bubble);
             _chatView.Add(row);
-            _chatView.schedule.Execute(() =>
-                _chatView.scrollOffset = new Vector2(0, _chatView.contentContainer.layout.height));
+            _chatView.schedule.Execute(() => _chatView.scrollOffset = new Vector2(0, _chatView.contentContainer.layout.height));
         }
     }
 }
