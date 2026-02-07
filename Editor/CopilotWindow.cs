@@ -14,13 +14,8 @@ using Observater.AiSkills.Runtime.Core;
 
 namespace Observater.AiSkills.Editor
 {
-    /// <summary>
-    /// AI Copilot 编辑器窗口。
-    /// <para>负责 UI 交互，收集用户输入与附件路径，并发送给 Python 后端。</para>
-    /// </summary>
     public class CopilotWindow : EditorWindow
     {
-        // ================= 样式定义 =================
         private static readonly Color BgColor = new Color(0.12f, 0.12f, 0.12f);
         private static readonly Color InputBgColor = new Color(0.24f, 0.24f, 0.24f);
         private static readonly Color UserBubbleColor = new Color(0f, 0.47f, 0.84f);
@@ -37,16 +32,13 @@ namespace Observater.AiSkills.Editor
 
         private const string PREF_SHOW_DEBUG = "AiSkills_ShowDebug";
 
-        // UI 元素
         private ScrollView _chatView;
         private TextField _inputField;
         private Button _sendBtn;
 
-        // 附件相关
         private List<string> _attachments = new List<string>();
         private VisualElement _attachmentContainer;
 
-        // 日志与设置
         private VisualElement _logContainer;
         private ScrollView _statusLogView;
         private Foldout _logFoldout;
@@ -59,9 +51,10 @@ namespace Observater.AiSkills.Editor
         private bool _isProcessing = false;
         private bool _showDebugLog = true;
 
+        private bool _historyLoaded = false;
+
         private UnityWebRequest _currentRequest;
 
-        // 不支持的文件后缀（Unity端简单过滤，Python端会有更严格的检查）
         private readonly string[] _binaryExtensions = { ".dll", ".exe", ".so", ".png", ".jpg", ".mat", ".prefab", ".meta" };
 
         [MenuItem("Tools/AI Copilot")]
@@ -76,12 +69,38 @@ namespace Observater.AiSkills.Editor
         {
             AiSkillsBridge.OnStatusLog += HandleStatusLog;
             _showDebugLog = EditorPrefs.GetBool(PREF_SHOW_DEBUG, true);
+
+            _historyLoaded = false;
+            TryLoadHistoryAuto();
         }
 
         private void OnDisable()
         {
             AiSkillsBridge.OnStatusLog -= HandleStatusLog;
             if (_currentRequest != null) _currentRequest.Abort();
+        }
+
+        private void OnFocus()
+        {
+            if (!_historyLoaded && !_isProcessing)
+            {
+                TryLoadHistoryAuto();
+            }
+        }
+
+        private async void TryLoadHistoryAuto()
+        {
+            int retryCount = 0;
+            while (retryCount < 5 && !_historyLoaded)
+            {
+                if (await LoadHistoryFromServer(silent: true))
+                {
+                    _historyLoaded = true;
+                    return;
+                }
+                await Task.Delay(1500);
+                retryCount++;
+            }
         }
 
         public void CreateGUI()
@@ -203,17 +222,141 @@ namespace Observater.AiSkills.Editor
             toolbar.style.backgroundColor = new Color(0.16f, 0.16f, 0.16f);
             toolbar.style.flexShrink = 0;
 
+            toolbar.Add(new ToolbarButton(OnNewChatClicked)
+            {
+                text = "New Chat",
+                style = { unityFontStyleAndWeight = FontStyle.Bold, marginRight = 5 }
+            });
+
+            toolbar.Add(new ToolbarButton(OnImportHistoryClicked)
+            {
+                text = "Import JSON"
+            });
+
             toolbar.Add(new ToolbarButton(() =>
             {
                 AiSkillsBridge.RestartPython();
                 _statusLogView?.Clear();
                 AddMessage("System", "Service Restarted.", false);
+                _historyLoaded = false;
+                TryLoadHistoryAuto();
             })
-            { text = "Restart Service", style = { unityFontStyleAndWeight = FontStyle.Bold } });
+            { text = "Restart Svc" });
 
-            toolbar.Add(new ToolbarButton(() => { _chatView.Clear(); }) { text = "Clear Chat" });
-            toolbar.Add(new ToolbarButton(() => { _statusLogView?.Clear(); }) { text = "Clear Log" });
+            toolbar.Add(new ToolbarButton(() => { _chatView.Clear(); }) { text = "Clear UI" });
             root.Add(toolbar);
+        }
+
+        private async Task<bool> LoadHistoryFromServer(bool silent = false)
+        {
+            var config = AiSkillsBridge.Config;
+            var req = UnityWebRequest.Get($"http://127.0.0.1:{config.Port}/history/get");
+            var op = req.SendWebRequest();
+
+            int timeout = 0;
+            while (!op.isDone && timeout < 100) { await Task.Delay(10); timeout++; }
+
+            bool success = false;
+
+            if (req.result == UnityWebRequest.Result.Success)
+            {
+                try
+                {
+                    var history = JArray.Parse(req.downloadHandler.text);
+                    if (history.Count > 0)
+                    {
+                        if (!silent) _chatView.Clear();
+
+                        var existingCount = _chatView.Query<VisualElement>().ToList().Count;
+                        if (existingCount <= 1)
+                        {
+                            if (!silent) AddMessage("System", "History Loaded.", false);
+
+                            foreach (var entry in history)
+                            {
+                                string role = entry["role"]?.ToString();
+                                string content = entry["content"]?.ToString();
+                                string summary = entry["summary"]?.ToString();
+
+                                bool isUser = role == "user";
+                                AddMessage(isUser ? "User" : "AI", content, isUser);
+                                if (!string.IsNullOrEmpty(summary)) HandleStatusLog($"[History] {summary}");
+                            }
+                            _chatView.schedule.Execute(() => _chatView.scrollOffset = new Vector2(0, _chatView.contentContainer.layout.height));
+                        }
+                    }
+                    success = true;
+                }
+                catch { }
+            }
+            req.Dispose();
+            return success;
+        }
+
+        private async void OnNewChatClicked()
+        {
+            bool confirm = EditorUtility.DisplayDialog("New Chat",
+                "Clear conversation memory?", "Yes", "No");
+
+            if (!confirm) return;
+
+            _chatView.Clear();
+            _attachments.Clear();
+            RefreshAttachmentList();
+            AddMessage("System", "Clearing history...", false);
+
+            var config = AiSkillsBridge.Config;
+            var req = UnityWebRequest.PostWwwForm($"http://127.0.0.1:{config.Port}/history/clear", "{}");
+            req.SetRequestHeader("Content-Type", "application/json");
+
+            var op = req.SendWebRequest();
+            while (!op.isDone) await Task.Yield();
+
+            if (req.result == UnityWebRequest.Result.Success)
+            {
+                AddMessage("System", "Conversation history cleared.", false);
+                HandleStatusLog("[History] Cleared.");
+                _historyLoaded = true;
+            }
+            req.Dispose();
+        }
+
+        private async void OnImportHistoryClicked()
+        {
+            string path = EditorUtility.OpenFilePanel("Import History JSON", "", "json");
+            if (string.IsNullOrEmpty(path)) return;
+
+            try
+            {
+                string jsonContent = File.ReadAllText(path);
+
+                var config = AiSkillsBridge.Config;
+                var req = new UnityWebRequest($"http://127.0.0.1:{config.Port}/history/import", "POST");
+                byte[] bodyRaw = System.Text.Encoding.UTF8.GetBytes(JObject.FromObject(new { content = jsonContent }).ToString());
+                req.uploadHandler = new UploadHandlerRaw(bodyRaw);
+                req.downloadHandler = new DownloadHandlerBuffer();
+                req.SetRequestHeader("Content-Type", "application/json");
+
+                var op = req.SendWebRequest();
+                while (!op.isDone) await Task.Yield();
+
+                if (req.result == UnityWebRequest.Result.Success)
+                {
+                    AddMessage("System", $"History imported from {Path.GetFileName(path)}", false);
+                    HandleStatusLog("[History] Imported successfully.");
+                    _chatView.Clear();
+                    await LoadHistoryFromServer(false);
+                }
+                else
+                {
+                    AddMessage("System", $"Import failed: {req.error}", false);
+                }
+                req.Dispose();
+            }
+            catch (Exception e)
+            {
+                EditorUtility.DisplayDialog("Error", $"Read file failed: {e.Message}", "OK");
+            }
         }
 
         private void CreateInputArea(VisualElement root)
@@ -228,17 +371,14 @@ namespace Observater.AiSkills.Editor
             };
             SetPadding(container.style, 10);
 
-            // 附件操作栏
             CreateAttachmentTools(container);
 
-            // 附件显示区
             _attachmentContainer = new VisualElement
             {
                 style = { flexDirection = FlexDirection.Row, flexWrap = Wrap.Wrap, marginBottom = 5, minHeight = 0 }
             };
             container.Add(_attachmentContainer);
 
-            // 输入框区域
             var row = new VisualElement
             {
                 style =
@@ -263,7 +403,6 @@ namespace Observater.AiSkills.Editor
                 }
             };
 
-            // Shift+Enter 发送，Enter 换行
             _inputField.RegisterCallback<KeyDownEvent>(evt =>
             {
                 if (evt.keyCode == KeyCode.Return && evt.shiftKey)
@@ -304,7 +443,6 @@ namespace Observater.AiSkills.Editor
             row.Add(_sendBtn);
             container.Add(row);
 
-            // 提示信息
             container.Add(new Label("Shift+Enter to Send")
             {
                 style = { fontSize = 9, color = Color.gray, alignSelf = Align.FlexEnd, marginRight = 5 }
@@ -317,22 +455,19 @@ namespace Observater.AiSkills.Editor
         {
             var row = new VisualElement { style = { flexDirection = FlexDirection.Row, marginBottom = 5 } };
 
-            // 1. 添加单个文件
             row.Add(new Button(AddFile)
             {
                 text = "+ Add File",
                 style = { fontSize = 10, backgroundColor = AttachmentChipColor, color = Color.white }
             });
 
-            // 2. 添加选中的文件 (支持多选)
             row.Add(new Button(AddSelectedAssets)
             {
                 text = "+ Add Selected",
-                tooltip = "Add currently selected assets from Project window",
+                tooltip = "Add currently selected assets/folders from Project window",
                 style = { fontSize = 10, backgroundColor = AttachmentChipColor, color = Color.white }
             });
 
-            // 3. 清空列表
             row.Add(new Button(() => { _attachments.Clear(); RefreshAttachmentList(); })
             {
                 text = "Clear Files",
@@ -347,15 +482,11 @@ namespace Observater.AiSkills.Editor
             string path = EditorUtility.OpenFilePanel("Select File", "Assets", "");
             if (string.IsNullOrEmpty(path)) return;
 
-            // 转换为相对路径
             if (path.StartsWith(Application.dataPath))
                 path = "Assets" + path.Substring(Application.dataPath.Length);
 
-            if (!_attachments.Contains(path))
-            {
-                _attachments.Add(path);
-                RefreshAttachmentList();
-            }
+            ValidateAndAddPath(path);
+            RefreshAttachmentList();
         }
 
         private void AddSelectedAssets()
@@ -367,26 +498,41 @@ namespace Observater.AiSkills.Editor
                 string path = AssetDatabase.GetAssetPath(obj);
                 if (string.IsNullOrEmpty(path)) continue;
 
-                // 简单的文件夹处理：如果是文件夹，可能暂不递归添加，避免误操作
                 if (Directory.Exists(path))
                 {
-                    // 可选：如果希望支持文件夹，可以在这里做 GetFiles
-                    // 目前仅添加选中的具体文件
-                    continue;
+                    string[] files = Directory.GetFiles(path, "*.*", SearchOption.AllDirectories);
+                    foreach (var file in files)
+                    {
+                        string normalized = file.Replace("\\", "/");
+                        if (ValidateAndAddPath(normalized)) count++;
+                    }
                 }
-
-                if (!_attachments.Contains(path))
+                else
                 {
-                    // 简单过滤
-                    string ext = Path.GetExtension(path).ToLower();
-                    if (_binaryExtensions.Contains(ext)) continue;
-
-                    _attachments.Add(path);
-                    count++;
+                    if (ValidateAndAddPath(path)) count++;
                 }
             }
+
             if (count > 0) RefreshAttachmentList();
-            else HandleStatusLog("[Info] No valid text assets selected.");
+            else HandleStatusLog("[Info] No valid text assets found in selection.");
+        }
+
+        private bool ValidateAndAddPath(string path)
+        {
+            if (_attachments.Contains(path)) return false;
+
+            string ext = Path.GetExtension(path).ToLower();
+            if (_binaryExtensions.Contains(ext)) return false;
+
+            if (path.EndsWith(".cs") || path.EndsWith(".json") || path.EndsWith(".txt") ||
+                path.EndsWith(".xml") || path.EndsWith(".yaml") || path.EndsWith(".shader") ||
+                path.EndsWith(".compute") || path.EndsWith(".md"))
+            {
+                _attachments.Add(path);
+                return true;
+            }
+
+            return false;
         }
 
         private void RefreshAttachmentList()
@@ -457,7 +603,6 @@ namespace Observater.AiSkills.Editor
                 string p = _inputField.value.Trim();
                 if (string.IsNullOrEmpty(p) && _attachments.Count == 0) return;
 
-                // 构建用户显示的 Prompt (包含附件提示)
                 string displayMsg = p;
                 if (_attachments.Count > 0)
                 {
@@ -468,7 +613,6 @@ namespace Observater.AiSkills.Editor
                 UpdateUIState(true);
                 _inputField.value = "";
 
-                // 清空附件列表（可选：发送后是否清空？通常习惯清空以防下一次误发）
                 var sentAttachments = new List<string>(_attachments);
                 _attachments.Clear();
                 RefreshAttachmentList();
@@ -496,8 +640,6 @@ namespace Observater.AiSkills.Editor
         {
             var config = AiSkillsBridge.Config;
 
-            // [关键修改] 发送路径列表 + 项目根目录
-            // Path.GetDirectoryName(Application.dataPath) 通常指向 Unity 项目根文件夹 (包含 Assets, Packages 等)
             string projectRoot = Path.GetDirectoryName(Application.dataPath);
 
             var json = new JObject
@@ -507,7 +649,6 @@ namespace Observater.AiSkills.Editor
                 ["base_url"] = config.BaseUrl,
                 ["model"] = config.Model,
 
-                // 发送给 Python 的数据
                 ["attachments"] = JArray.FromObject(attachments),
                 ["project_root"] = projectRoot
             };
@@ -516,7 +657,7 @@ namespace Observater.AiSkills.Editor
                 json.ToString(), "application/json");
 
             _currentRequest.downloadHandler = new DownloadHandlerBuffer();
-            _currentRequest.timeout = 300; // 5分钟超时，大文件读取可能耗时
+            _currentRequest.timeout = 300;
             _currentRequest.disposeUploadHandlerOnDispose = true;
             _currentRequest.disposeDownloadHandlerOnDispose = true;
 
@@ -541,8 +682,8 @@ namespace Observater.AiSkills.Editor
                 {
                     var root = JObject.Parse(_currentRequest.downloadHandler.text);
                     string aiReply = root["reply"]?.ToString() ?? "No reply";
+                    string summary = root["summary"]?.ToString();
 
-                    // 处理技能显示
                     var skillsToken = root["selected_skills"];
                     string skillHeader = "";
                     if (skillsToken != null && skillsToken.HasValues)
@@ -554,7 +695,6 @@ namespace Observater.AiSkills.Editor
                             skillHeader = $"[🛠 Used Skills: {skillsStr}]\n\n";
                     }
 
-                    // [新增] 处理 Token 用量显示 (可选)
                     if (root["usage"] != null)
                     {
                         var usage = root["usage"];
@@ -562,10 +702,13 @@ namespace Observater.AiSkills.Editor
                         if (!string.IsNullOrEmpty(total))
                             HandleStatusLog($"[Info] Tokens: {total}");
                     }
+                    if (!string.IsNullOrEmpty(summary))
+                    {
+                        HandleStatusLog($"[Summary] {summary}");
+                    }
 
                     AddMessage("AI", skillHeader + aiReply, false);
 
-                    // 处理执行结果
                     if (root["execution"] != null)
                     {
                         var exec = root["execution"];
@@ -585,7 +728,6 @@ namespace Observater.AiSkills.Editor
             _currentRequest = null;
         }
 
-        // 辅助方法保持不变
         private void SetPadding(IStyle s, float v) { s.paddingTop = v; s.paddingBottom = v; s.paddingLeft = v; s.paddingRight = v; }
 
         private void HandleStatusLog(string msg)
@@ -651,7 +793,6 @@ namespace Observater.AiSkills.Editor
 
             SetPadding(bubble.style, 8);
 
-            // 处理 Skill Tag 高亮
             if (t.StartsWith("[🛠 Used Skills:"))
             {
                 int endIdx = t.IndexOf("]\n\n");
@@ -686,25 +827,35 @@ namespace Observater.AiSkills.Editor
                     {
                         style =
                         {
-                            backgroundColor = CodeBlockBgColor, color = new Color(0.8f, 0.9f, 0.8f),
-                            fontSize = 11, whiteSpace = WhiteSpace.Normal,
+                            backgroundColor = CodeBlockBgColor,
+                            color = new Color(0.8f, 0.9f, 0.8f),
+                            fontSize = 11,
+                            whiteSpace = WhiteSpace.Normal,
                             paddingTop = 5, paddingBottom = 5, paddingLeft = 5, paddingRight = 5,
-                            borderTopLeftRadius = 4, borderTopRightRadius = 4, borderBottomLeftRadius = 4, borderBottomRightRadius = 4
+                            borderTopLeftRadius = 4, borderTopRightRadius = 4, borderBottomLeftRadius = 4,
+                            borderBottomRightRadius = 4
                         },
                         selection = { isSelectable = true }
                     };
+
                     foldout.Add(codeLabel);
                     bubble.Add(foldout);
                 }
                 else
                 {
-                    bubble.Add(new Label(part.Trim()) { style = { whiteSpace = WhiteSpace.Normal, fontSize = 13 }, selection = { isSelectable = true } });
+                    var label = new Label(part.Trim())
+                    {
+                        style = { whiteSpace = WhiteSpace.Normal, fontSize = 13 },
+                        selection = { isSelectable = true }
+                    };
+                    bubble.Add(label);
                 }
             }
 
             row.Add(bubble);
             _chatView.Add(row);
-            _chatView.schedule.Execute(() => _chatView.scrollOffset = new Vector2(0, _chatView.contentContainer.layout.height));
+            _chatView.schedule.Execute(() =>
+                _chatView.scrollOffset = new Vector2(0, _chatView.contentContainer.layout.height));
         }
     }
 }

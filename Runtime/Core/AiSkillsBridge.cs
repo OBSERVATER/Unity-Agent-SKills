@@ -1,7 +1,7 @@
 using UnityEngine;
 using UnityEditor;
 using UnityEditor.Scripting.Python;
-using UnityEditor.Compilation; // 新增命名空间引用
+using UnityEditor.Compilation;
 using System;
 using System.Net;
 using System.Net.Sockets;
@@ -16,68 +16,30 @@ using Debug = UnityEngine.Debug;
 
 namespace Observater.AiSkills.Runtime.Core
 {
-    /// <summary>
-    /// Unity 与外部 Python 进程通信的核心桥接类。
-    /// <para>负责管理 Python 进程生命周期、Socket 服务器以及主线程回调分发。</para>
-    /// </summary>
     [InitializeOnLoad]
     public static class AiSkillsBridge
     {
-        // ================= 事件系统 =================
-        
-        /// <summary>
-        /// 当产生状态日志时触发
-        /// </summary>
         public static event Action<string> OnStatusLog;
 
-        /// <summary>
-        /// 线程安全的日志队列，用于将后台线程的日志转送给主线程
-        /// </summary>
         private static readonly ConcurrentQueue<string> _logQueue = new ConcurrentQueue<string>();
 
-        /// <summary>
-        /// 内部日志记录方法，将消息入队
-        /// </summary>
         private static void LogToUI(string msg) => _logQueue.Enqueue(msg);
 
-        // ================= 常量配置 =================
-
-        /// <summary>
-        /// Unity 端监听的 Socket 端口（供 Python 回连）
-        /// </summary>
         private const int UNITY_PORT = 8081;
 
-        /// <summary>
-        /// 内部协议指令：用于优雅关闭 Socket 监听循环
-        /// </summary>
         private const string CMD_SHUTDOWN_LISTENER = "@@INTERNAL_STOP@@";
 
-        /// <summary>
-        /// 插件包名，用于路径搜索
-        /// </summary>
         private const string PACKAGE_NAME = "com.observater.aiskills";
-        
-        /// <summary>
-        /// Python 服务器脚本相对于包根目录的路径
-        /// </summary>
+
         private const string RELATIVE_SCRIPT_PATH = "Runtime/Python/Core/ai_server.py";
-        
-        /// <summary>
-        /// 内置 Python 解释器相对于包根目录的路径
-        /// </summary>
+
         private const string RELATIVE_PYTHON_EXE_PATH = "Runtime/Python/python.exe";
 
-        /// <summary>
-        /// 配置文件在项目中的存储路径
-        /// </summary>
         private static string ConfigPath => Path.Combine(Application.dataPath, "../ProjectSettings/AiSkillsConfig.json");
 
-        /// <summary>
-        /// 当前加载的配置实例
-        /// </summary>
-        public static AiSkillsConfig Config { get; private set; }
+        public static string HistoryPath => Path.GetFullPath(Path.Combine(Application.dataPath, "../ProjectSettings/AiSkills_History.json"));
 
-        // ================= 运行时状态 =================
+        public static AiSkillsConfig Config { get; private set; }
 
         private static TcpListener _listener;
         private static Thread _serverThread;
@@ -85,32 +47,17 @@ namespace Observater.AiSkills.Runtime.Core
         private static NetworkStream _currentStream;
         private static Process _pythonProcess;
 
-        /// <summary>
-        /// 接收到的 Python 指令队列（代码字符串）
-        /// </summary>
         private static readonly ConcurrentQueue<string> _commandQueue = new ConcurrentQueue<string>();
 
-        /// <summary>
-        /// 静态构造函数，初始化并挂载编辑器事件
-        /// </summary>
         static AiSkillsBridge()
         {
             LoadConfig();
             EditorApplication.update += OnUpdate;
-            
-            // 编辑器退出时清理
             EditorApplication.quitting += () => RestartPython(true, false);
-
             AssemblyReloadEvents.beforeAssemblyReload += () => RestartPython(true, false);
-
             EditorApplication.delayCall += () => RestartPython(true);
         }
 
-        // ================= 配置管理 =================
-
-        /// <summary>
-        /// 从磁盘加载配置，如果不存在则创建默认配置
-        /// </summary>
         public static void LoadConfig()
         {
             if (File.Exists(ConfigPath))
@@ -131,9 +78,6 @@ namespace Observater.AiSkills.Runtime.Core
             }
         }
 
-        /// <summary>
-        /// 将当前配置保存到磁盘
-        /// </summary>
         public static void SaveConfig()
         {
             try
@@ -146,13 +90,6 @@ namespace Observater.AiSkills.Runtime.Core
             }
         }
 
-        // ================= 核心生命周期控制 =================
-
-        /// <summary>
-        /// 重启 Python 服务环境
-        /// </summary>
-        /// <param name="killAndRestart">是否先杀掉旧进程并停止服务</param>
-        /// <param name="startNew">是否启动新服务</param>
         public static void RestartPython(bool killAndRestart = true, bool startNew = true)
         {
             if (killAndRestart)
@@ -165,7 +102,6 @@ namespace Observater.AiSkills.Runtime.Core
 
             if (startNew)
             {
-                // 重新加载配置，确保最新的 ShowConsole 设置生效
                 LoadConfig();
                 LogToUI($"[System] Starting services (Port {Config.Port} <-> {UNITY_PORT})...");
                 StartServer();
@@ -173,35 +109,24 @@ namespace Observater.AiSkills.Runtime.Core
             }
         }
 
-        /// <summary>
-        /// 获取包的根目录路径（自动适配 UPM 引用或 Assets 源码模式）
-        /// </summary>
-        /// <returns>包的绝对路径，如果找不到返回 null</returns>
         private static string GetPackageRootPath()
         {
-            // 1. 尝试 UPM 路径
             string packagePath = Path.GetFullPath($"Packages/{PACKAGE_NAME}");
             if (Directory.Exists(packagePath)) return packagePath;
 
-            // 2. 尝试 Assets 开发路径
             string assetsPath = Path.GetFullPath($"Assets/{PACKAGE_NAME}");
             if (Directory.Exists(assetsPath)) return assetsPath;
-            
-            // 3. 暴力搜索核心文件 (防止文件夹改名)
-            var guids = AssetDatabase.FindAssets("ai_server"); 
+
+            var guids = AssetDatabase.FindAssets("ai_server");
             if (guids.Length > 0)
             {
                 string path = AssetDatabase.GUIDToAssetPath(guids[0]);
-                // 回退到包根目录: .../Runtime/Python/Core/ai_server.py -> ../../../..
                 return Path.GetFullPath(path + "/../../../../");
             }
 
             return null;
         }
 
-        /// <summary>
-        /// 检查路径并启动 Python 进程
-        /// </summary>
         private static void CheckAndStartPython()
         {
             string rootPath = GetPackageRootPath();
@@ -220,31 +145,24 @@ namespace Observater.AiSkills.Runtime.Core
                 return;
             }
 
-            // 如果找不到内置 Python，回退到系统环境变量
             if (!File.Exists(pythonExePath))
             {
                 LogToUI($"[Warn] Embedded Python not found. Trying system 'python'...");
-                pythonExePath = "python"; 
+                pythonExePath = "python";
             }
 
             StartPythonProcess(pythonExePath, scriptPath, Config.Port);
         }
 
-        /// <summary>
-        /// 启动 Python 子进程 (包含黑窗控制逻辑)
-        /// </summary>
-        /// <param name="pythonExe">Python解释器路径</param>
-        /// <param name="scriptPath">脚本路径</param>
-        /// <param name="port">端口参数</param>
         private static void StartPythonProcess(string pythonExe, string scriptPath, int port)
         {
             try
             {
                 string workingDir = Path.GetDirectoryName(scriptPath);
-                string args = $"\"{scriptPath}\" --port {port}";
+                string args = $"\"{scriptPath}\" --port {port} --history \"{HistoryPath}\"";
 
                 LogToUI($"[System] Launching Python: {pythonExe} (Console: {Config.ShowConsole})");
-                
+
                 var startInfo = new ProcessStartInfo
                 {
                     FileName = pythonExe,
@@ -265,22 +183,17 @@ namespace Observater.AiSkills.Runtime.Core
             }
         }
 
-        /// <summary>
-        /// 终止 Python 进程（尝试 HTTP 优雅关闭，失败则强杀）
-        /// </summary>
         private static void KillPythonProcess()
         {
-            // [关键] 即使 _pythonProcess 本地引用已丢失（如刷新后），也尝试通过 HTTP 关闭旧进程
             try
             {
                 using (var c = new WebClient())
                 {
                     c.Headers.Add("Content-Type", "application/json");
-                    // 发送 shutdown 指令
                     c.UploadString($"http://127.0.0.1:{Config.Port}/shutdown", "POST", "{}");
                 }
             }
-            catch { /* 忽略连接错误，可能进程早已不存在 */ }
+            catch { }
 
             if (_pythonProcess != null)
             {
@@ -294,11 +207,6 @@ namespace Observater.AiSkills.Runtime.Core
             }
         }
 
-        // ================= Socket 服务端逻辑 =================
-
-        /// <summary>
-        /// 启动 Unity 端的 Socket 服务器
-        /// </summary>
         private static void StartServer()
         {
             if (_isRunning) return;
@@ -336,9 +244,6 @@ namespace Observater.AiSkills.Runtime.Core
             LogToUI($"[Error] Startup failed: Port {UNITY_PORT} cannot be bound.");
         }
 
-        /// <summary>
-        /// 尝试连接并关闭可能残留的旧监听器
-        /// </summary>
         private static void TryKillOldListener()
         {
             try
@@ -360,9 +265,6 @@ namespace Observater.AiSkills.Runtime.Core
             catch { }
         }
 
-        /// <summary>
-        /// 停止 Socket 服务器并清理资源
-        /// </summary>
         private static void StopServer()
         {
             _isRunning = false;
@@ -372,7 +274,6 @@ namespace Observater.AiSkills.Runtime.Core
             _listener = null;
             _currentStream = null;
 
-            // 清理队列
             while (_commandQueue.TryDequeue(out _)) { }
             while (_logQueue.TryDequeue(out _)) { }
 
@@ -383,9 +284,6 @@ namespace Observater.AiSkills.Runtime.Core
             }
         }
 
-        /// <summary>
-        /// 后台线程监听循环
-        /// </summary>
         private static void ListenLoop()
         {
             while (_isRunning)
@@ -395,7 +293,7 @@ namespace Observater.AiSkills.Runtime.Core
                     var client = _listener.AcceptTcpClient();
                     _currentStream = client.GetStream();
 
-                    byte[] buffer = new byte[1024 * 1024]; // 1MB buffer
+                    byte[] buffer = new byte[1024 * 1024];
                     int bytesRead = _currentStream.Read(buffer, 0, buffer.Length);
 
                     if (bytesRead > 0)
@@ -410,7 +308,6 @@ namespace Observater.AiSkills.Runtime.Core
                         }
 
                         LogToUI($"[In] Received Python Command ({bytesRead} bytes)");
-                        // 将指令推入队列，等待主线程执行
                         _commandQueue.Enqueue(data);
                     }
                     else
@@ -418,24 +315,17 @@ namespace Observater.AiSkills.Runtime.Core
                         client.Close();
                     }
                 }
-                catch { /* 忽略监听中断异常 */ }
+                catch { }
             }
         }
 
-        // ================= 主线程更新循环 =================
-
-        /// <summary>
-        /// EditorUpdate 回调，处理主线程逻辑
-        /// </summary>
         private static void OnUpdate()
         {
-            // 1. 处理日志队列
             while (_logQueue.TryDequeue(out string logMsg))
             {
                 OnStatusLog?.Invoke(logMsg);
             }
 
-            // 2. 处理指令队列
             if (_commandQueue.TryDequeue(out string pythonCode))
             {
                 LogToUI("[Run] Executing Python Code...");
@@ -443,18 +333,12 @@ namespace Observater.AiSkills.Runtime.Core
             }
         }
 
-        /// <summary>
-        /// 使用 Unity Python (Python.NET) 运行代码
-        /// </summary>
-        /// <param name="code">要执行的 Python 代码</param>
         private static void RunPythonCode(string code)
         {
             var sw = Stopwatch.StartNew();
 
             try
             {
-                // 注意：这里使用的是 Unity 内置的 PythonRunner，而非外部进程
-                // 外部进程通过 Socket 发送代码字符串，由这里在 Unity 内部上下文中执行
                 PythonRunner.RunString(code);
             }
             catch (Exception e)
@@ -470,29 +354,15 @@ namespace Observater.AiSkills.Runtime.Core
             }
         }
 
-        // ================= 消息发送辅助方法 =================
-
-        /// <summary>
-        /// 发送标准成功消息给 Python
-        /// </summary>
         public static void SendMessage(string msg) =>
             SendResponse(JsonConvert.SerializeObject(new { status = "ok", message = msg }));
 
-        /// <summary>
-        /// 发送 JSON 数据结果给 Python
-        /// </summary>
         public static void SendResult(string jsonContent) =>
             SendResponse($"{{\"status\":\"ok\", \"data\": {jsonContent}}}");
 
-        /// <summary>
-        /// 发送错误信息给 Python
-        /// </summary>
         public static void SendError(string error) =>
             SendResponse(JsonConvert.SerializeObject(new { status = "error", message = error }));
 
-        /// <summary>
-        /// 底层发送逻辑
-        /// </summary>
         private static void SendResponse(string jsonPackage)
         {
             if (_currentStream != null && _currentStream.CanWrite)
