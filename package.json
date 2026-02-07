@@ -1,7 +1,7 @@
 {
   "name": "com.observater.aiskills",
   "displayName": "AI Skills",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "unity": "2021.3",
   "description": "AI Skills is an editor automation tool that bridges Large Language Models (LLM) with Unity's Python execution environment. It allows developers to control the Unity Editor using natural language commands.\n\nKey Features:\n\u25AA GameObject Management: Create, find, and manipulate scene objects.\n\u25AA Component Control: Automatically add and configure components like Rigidbodies and Colliders.\n\u25AA Asset Pipeline: Find, move, and manage project assets via Python scripts.\n\u25AA UI Generation: Instantly create functional UI hierarchies (Canvas, Text, Buttons).\n\u25AA Prefab Workflow: Instantiate and save prefabs programmatically.",
   "dependencies": {

@@ -61,7 +61,7 @@
 禁止项: 禁止使用 if **name** == "**main**": 守护代码。
 
 📂 目录结构 (Package Structure)
-Plaintext
+```Plaintext
 com.observater.aiskills
 ├── package.json # 包清单
 ├── README.md # 文档
@@ -76,3 +76,4 @@ com.observater.aiskills
 │ └── ...
 └── Runtime # 运行时逻辑 (C# / Python Bridge)
 └── ...
+```
