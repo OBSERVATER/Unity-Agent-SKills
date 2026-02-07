@@ -1,6 +1,7 @@
 using UnityEngine;
 using UnityEditor;
 using UnityEditor.Scripting.Python;
+using UnityEditor.Compilation; // 新增命名空间引用
 using System;
 using System.Net;
 using System.Net.Sockets;
@@ -25,7 +26,7 @@ namespace Observater.AiSkills.Runtime.Core
         // ================= 事件系统 =================
         
         /// <summary>
-        /// 当产生状态日志时触发（已调度到主线程，可直接更新 UI）
+        /// 当产生状态日志时触发
         /// </summary>
         public static event Action<string> OnStatusLog;
 
@@ -57,7 +58,7 @@ namespace Observater.AiSkills.Runtime.Core
         private const string PACKAGE_NAME = "com.observater.aiskills";
         
         /// <summary>
-        /// Python 服务器脚本相对于包根目录的路径 (已修正为 Core 目录)
+        /// Python 服务器脚本相对于包根目录的路径
         /// </summary>
         private const string RELATIVE_SCRIPT_PATH = "Runtime/Python/Core/ai_server.py";
         
@@ -96,9 +97,13 @@ namespace Observater.AiSkills.Runtime.Core
         {
             LoadConfig();
             EditorApplication.update += OnUpdate;
+            
+            // 编辑器退出时清理
             EditorApplication.quitting += () => RestartPython(true, false);
-            // 延迟一帧启动，确保 Editor 环境完全就绪
-            EditorApplication.delayCall += () => RestartPython(false);
+
+            AssemblyReloadEvents.beforeAssemblyReload += () => RestartPython(true, false);
+
+            EditorApplication.delayCall += () => RestartPython(true);
         }
 
         // ================= 配置管理 =================
@@ -265,6 +270,7 @@ namespace Observater.AiSkills.Runtime.Core
         /// </summary>
         private static void KillPythonProcess()
         {
+            // [关键] 即使 _pythonProcess 本地引用已丢失（如刷新后），也尝试通过 HTTP 关闭旧进程
             try
             {
                 using (var c = new WebClient())
