@@ -38,7 +38,7 @@ class HistoryManager:
         entry = {
             "timestamp": time.time(),
             "role": role,
-            "content": content
+            "content": content if role == "user" else None  # 只保存用户输入的原始内容，助手回复不保存原始内容
         }
         if summary:
             entry["summary"] = summary
